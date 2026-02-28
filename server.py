@@ -7,133 +7,147 @@ import random
 HOST = "0.0.0.0"
 PORT = 5555
 
-rooms        = {}  # room_code → [player1_addr, player2_addr]
-addr_to_room = {}  # addr_key  → room_code
-last_seen    = {}  # addr_key  → timestamp
+rooms        = {}   # room_code → [conn1, conn2]
+addr_to_room = {}   # conn_id   → room_code
+clients      = {}   # conn_id   → conn
+lock         = threading.Lock()
 
-def addr_key(addr):
-    return f"{addr[0]}:{addr[1]}"
+def conn_id(conn):
+    return id(conn)
 
-def cleanup_loop(sock):
-    """Remove players who haven't pinged in 10 seconds and notify their opponent."""
-    while True:
-        now  = time.time()
-        dead = [a for a, t in list(last_seen.items()) if now - t > 10]
-        for a in dead:
-            print(f"[CLEANUP] Removing inactive player {a}")
-            room = addr_to_room.get(a)
-            if room and room in rooms:
-                other = next((p for p in rooms[room] if addr_key(p) != a), None)
-                if other:
-                    try:
-                        sock.sendto(json.dumps({"type": "disconnect"}).encode(), other)
-                    except Exception:
-                        pass
-                del rooms[room]
-            addr_to_room.pop(a, None)
-            last_seen.pop(a, None)
-        time.sleep(3)
+def send_msg(conn, msg):
+    try:
+        data = json.dumps(msg).encode()
+        length = len(data).to_bytes(4, 'big')
+        conn.sendall(length + data)
+    except Exception as e:
+        print(f"[SEND ERROR] {e}")
 
-def handle_packet(sock, data, addr):
-    last_seen[addr_key(addr)] = time.time()
+def recv_msg(conn):
+    try:
+        raw_len = recvall(conn, 4)
+        if not raw_len:
+            return None
+        length = int.from_bytes(raw_len, 'big')
+        data = recvall(conn, length)
+        if not data:
+            return None
+        return json.loads(data.decode())
+    except Exception:
+        return None
+
+def recvall(conn, n):
+    data = b""
+    while len(data) < n:
+        packet = conn.recv(n - len(data))
+        if not packet:
+            return None
+        data += packet
+    return data
+
+def handle_client(conn, addr):
+    cid = conn_id(conn)
+    print(f"[CONNECT] {addr} id={cid}")
+    with lock:
+        clients[cid] = conn
 
     try:
-        msg = json.loads(data.decode())
-    except Exception:
-        return
+        while True:
+            msg = recv_msg(conn)
+            if msg is None:
+                break
+            handle_msg(conn, cid, msg)
+    except Exception as e:
+        print(f"[ERROR] {addr}: {e}")
+    finally:
+        disconnect(conn, cid)
 
+def handle_msg(conn, cid, msg):
     msg_type = msg.get("type")
 
-    # ── SEARCH: player looking for a game ──────────────────────────────────
     if msg_type == "search":
-        # Find a room with exactly 1 player waiting
-        waiting_room = next(
-            (code for code, players in rooms.items() if len(players) == 1),
-            None
-        )
+        with lock:
+            # Find a waiting room with 1 player
+            waiting = next(
+                (code for code, conns in rooms.items() if len(conns) == 1),
+                None
+            )
+            if waiting:
+                rooms[waiting].append(conn)
+                addr_to_room[cid] = waiting
+                p1 = rooms[waiting][0]
+                p2 = rooms[waiting][1]
+                seed = int(waiting)
+            else:
+                room_code = str(random.randint(100000, 999999))
+                rooms[room_code] = [conn]
+                addr_to_room[cid] = room_code
+                waiting = None
 
-        if waiting_room:
-            # Join the waiting player
-            rooms[waiting_room].append(addr)
-            addr_to_room[addr_key(addr)] = waiting_room
-
-            p1 = rooms[waiting_room][0]
-            p2 = rooms[waiting_room][1]
-
-            # Room code doubles as the shared random seed for piece queue
-            seed = int(waiting_room)
-
-            sock.sendto(json.dumps({
-                "type": "start",
-                "role": "p1",
-                "seed": seed
-            }).encode(), p1)
-
-            sock.sendto(json.dumps({
-                "type": "start",
-                "role": "p2",
-                "seed": seed
-            }).encode(), p2)
-
-            print(f"[MATCH] Room {waiting_room}: {p1} vs {p2}")
-
+        if waiting:
+            send_msg(p1, {"type": "start", "role": "p1", "seed": seed})
+            send_msg(p2, {"type": "start", "role": "p2", "seed": seed})
+            print(f"[MATCH] Room {waiting} started")
         else:
-            # No waiting room — create one and wait
-            room_code = str(random.randint(100000, 999999))
-            rooms[room_code] = [addr]
-            addr_to_room[addr_key(addr)] = room_code
+            send_msg(conn, {"type": "waiting"})
+            print(f"[WAITING] Player {cid} waiting")
 
-            sock.sendto(json.dumps({
-                "type": "waiting"
-            }).encode(), addr)
-
-            print(f"[WAITING] Player {addr} waiting in room {room_code}")
-
-    # ── INPUT: forward this player's inputs to opponent ────────────────────
     elif msg_type == "input":
-        room = addr_to_room.get(addr_key(addr))
-        if not room or room not in rooms:
-            return
-        other = next((p for p in rooms[room] if p != addr), None)
+        with lock:
+            room = addr_to_room.get(cid)
+            if not room or room not in rooms:
+                return
+            other = next((c for c in rooms[room] if conn_id(c) != cid), None)
         if other:
-            sock.sendto(json.dumps({
+            send_msg(other, {
                 "type":  "input",
                 "frame": msg.get("frame"),
-                "keys":  msg.get("keys")
-            }).encode(), other)
+                "keys":  msg.get("keys"),
+            })
 
-    # ── EVENT: rematch requests, forfeit, etc ──────────────────────────────
     elif msg_type == "event":
-        room = addr_to_room.get(addr_key(addr))
-        if not room or room not in rooms:
-            return
-        other = next((p for p in rooms[room] if p != addr), None)
+        with lock:
+            room = addr_to_room.get(cid)
+            if not room or room not in rooms:
+                return
+            other = next((c for c in rooms[room] if conn_id(c) != cid), None)
         if other:
-            sock.sendto(json.dumps(msg).encode(), other)
+            send_msg(other, msg)
 
-    # ── PING: keep-alive so server knows player is still connected ─────────
     elif msg_type == "ping":
-        sock.sendto(json.dumps({"type": "pong"}).encode(), addr)
+        send_msg(conn, {"type": "pong"})
 
+def disconnect(conn, cid):
+    print(f"[DISCONNECT] id={cid}")
+    with lock:
+        room = addr_to_room.get(cid)
+        if room and room in rooms:
+            other = next((c for c in rooms[room] if conn_id(c) != cid), None)
+            if other:
+                try:
+                    send_msg(other, {"type": "disconnect"})
+                except Exception:
+                    pass
+            del rooms[room]
+        addr_to_room.pop(cid, None)
+        clients.pop(cid, None)
+    try:
+        conn.close()
+    except Exception:
+        pass
 
 def main():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind((HOST, PORT))
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind((HOST, PORT))
+    server.listen(10)
     print(f"[SERVER] PuyoXTetris relay running on port {PORT}")
-
-    threading.Thread(target=cleanup_loop, args=(sock,), daemon=True).start()
-
     while True:
         try:
-            data, addr = sock.recvfrom(4096)
-            threading.Thread(
-                target=handle_packet,
-                args=(sock, data, addr),
-                daemon=True
-            ).start()
+            conn, addr = server.accept()
+            threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
         except Exception as e:
             print(f"[ERROR] {e}")
-
 
 if __name__ == "__main__":
     main()
