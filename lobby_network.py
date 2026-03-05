@@ -21,7 +21,7 @@ class LobbyNetwork:
         self.username        = None
         self.elo             = 1000
         self.stats           = {}
-        self._status         = "disconnected"  # disconnected/connecting/connected
+        self._status         = "connecting"  # disconnected/connecting/connected
         self._lock           = threading.Lock()
         self._recv_buf       = b""
         self._pending        = []   # incoming messages queue
