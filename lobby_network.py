@@ -30,6 +30,8 @@ class LobbyNetwork:
         self.match_found     = None # set when server sends match_found
         self.challenge_from  = None # {"from","elo"} pending challenge
         self.leaderboard     = []
+        self.rooms           = []   # list of room dicts from server
+        self.current_room    = None # room_id if in a room
 
     @property
     def status(self):
@@ -90,6 +92,21 @@ class LobbyNetwork:
 
     def get_leaderboard(self):
         if self.sock: _send_msg(self.sock, {"type":"leaderboard"})
+
+    def create_room(self, name, max_players, mode, password=""):
+        if self.sock: _send_msg(self.sock, {"type":"create_room","name":name,
+                                             "max_players":max_players,"mode":mode,
+                                             "password":password})
+
+    def join_room(self, room_id, password=""):
+        if self.sock: _send_msg(self.sock, {"type":"join_room","room_id":room_id,
+                                             "password":password})
+
+    def leave_room(self, room_id):
+        if self.sock: _send_msg(self.sock, {"type":"leave_room","room_id":room_id})
+
+    def start_room(self, room_id):
+        if self.sock: _send_msg(self.sock, {"type":"start_room","room_id":room_id})
 
     def pop_message(self):
         with self._lock:
@@ -182,6 +199,11 @@ class LobbyNetwork:
             self.leaderboard = msg.get("data",[])
             with self._lock: self._pending.append(msg)
         elif t == "pong":
-            pass  # heartbeat response, ignore
+            pass
+        elif t == "rooms_update":
+            self.rooms = msg.get("rooms", [])
+        elif t in ("room_created","room_joined_game","room_player_joined",
+                   "room_player_left","room_error"):
+            with self._lock: self._pending.append(msg)
         elif t == "error":
             with self._lock: self._pending.append(msg)
