@@ -214,6 +214,7 @@ def matchmaking_loop():
 def handle_client(sock, addr):
     username = None
     try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         sock.settimeout(30)
         # ── Auth ──────────────────────────────────────────────────────────
         msg = recv_msg(sock)
