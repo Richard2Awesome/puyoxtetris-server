@@ -4,8 +4,8 @@ Replaces the lockstep input sync for online play.
 """
 import socket, threading, json, time
 
-GAME_SRV_HOST = "your-game-server.railway.app"  # update after deploy
-GAME_SRV_PORT = 55300
+GAME_SRV_HOST = "hopper.proxy.rlwy.net"  # update after deploy
+GAME_SRV_PORT = 30918
 
 def _send(sock, msg):
     try:
