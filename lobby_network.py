@@ -3,8 +3,8 @@ import threading
 import json
 import time
 
-LOBBY_HOST = "your-lobby.railway.app"   # replace with your Railway lobby URL
-LOBBY_PORT = 55200
+LOBBY_HOST = "crossover.proxy.rlwy.net"   # replace with your Railway lobby URL
+LOBBY_PORT = 53244
 
 def _send_msg(sock, msg):
     try:
